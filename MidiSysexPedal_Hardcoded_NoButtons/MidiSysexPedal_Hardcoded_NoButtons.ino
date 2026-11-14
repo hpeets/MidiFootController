@@ -1,28 +1,22 @@
 // MIDI CC -> Korg Krome SysEx mute/solo box
 //
-// CC 102        -> Bank up
-// CC 103        -> Bank down
-// CC 104-111    -> Bank 1 (mute), tracks 1-8
-// CC 112-119    -> Bank 2 (solo), tracks 1-8
-// Only the CC range matching the active bank triggers SysEx.
-// All of these CCs are consumed (not forwarded); everything else passes through.
+// CC 104-111 -> Mute, tracks 1-8
+// CC 112-119 -> Solo, tracks 1-8
+// Both ranges are always active. These CCs are consumed (not forwarded);
+// everything else passes through.
 //
 // SysEx format (mute): F0 42 30 00 01 15 41 00 00 [track 0C+] 00 28 00 00 00 00 [on/off] F7
 // SysEx format (solo): same, with function byte 29 instead of 28
 
 // ---- Config ----
-const byte CC_BANK_UP = 102;
-const byte CC_BANK_DOWN = 103;
-
-const int MAX_BANKS = 2;
+const int NUM_FUNCTIONS = 2;
 const int NUM_TRACKS = 8;
-const byte MIDI_FUNCTION[MAX_BANKS] = {0x28, 0x29};   // bank 1 = mute, bank 2 = solo
-const byte CC_FIRST[MAX_BANKS] = {104, 112};          // first CC of each bank
+const byte MIDI_FUNCTION[NUM_FUNCTIONS] = {0x28, 0x29};   // 0 = mute, 1 = solo
+const byte CC_FIRST[NUM_FUNCTIONS] = {104, 112};          // first CC of each range
 const byte FIRST_TRACK = 0x0C;
 
 // ---- State ----
-bool buttonToggle[MAX_BANKS][NUM_TRACKS] = {};        // all false at start
-int currentBank = 0;
+bool buttonToggle[NUM_FUNCTIONS][NUM_TRACKS] = {};        // all false at start
 
 // MIDI input parser state
 byte runningStatus = 0;     // last channel status seen (for running status)
@@ -41,25 +35,24 @@ int dataBytesForStatus(byte status) {
   return 2;                                  // Note On/Off, Poly AT, CC, Pitch Bend
 }
 
-// Returns track index 0-7 if cc belongs to the given bank's range, else -1
-int ccToTrack(byte cc, int bank) {
-  if (cc >= CC_FIRST[bank] && cc < CC_FIRST[bank] + NUM_TRACKS) return cc - CC_FIRST[bank];
+// Returns track index 0-7 if cc belongs to the given function's range, else -1
+int ccToTrack(byte cc, int func) {
+  if (cc >= CC_FIRST[func] && cc < CC_FIRST[func] + NUM_TRACKS) return cc - CC_FIRST[func];
   return -1;
 }
 
-// True if the CC is one of ours (bank control or any bank's track range)
+// True if the CC falls in any of our ranges
 bool isOurCC(byte cc) {
-  if (cc == CC_BANK_UP || cc == CC_BANK_DOWN) return true;
-  for (int b = 0; b < MAX_BANKS; b++) {
-    if (ccToTrack(cc, b) >= 0) return true;
+  for (int f = 0; f < NUM_FUNCTIONS; f++) {
+    if (ccToTrack(cc, f) >= 0) return true;
   }
   return false;
 }
 
-void sendSysex(int track, bool on) {
+void sendSysex(int func, int track, bool on) {
   byte data[] = {
     0xF0, 0x42, 0x30, 0x00, 0x01, 0x15, 0x41, 0x00, 0x00,
-    (byte)(FIRST_TRACK + track), 0x00, MIDI_FUNCTION[currentBank],
+    (byte)(FIRST_TRACK + track), 0x00, MIDI_FUNCTION[func],
     0x00, 0x00, 0x00, 0x00, (byte)(on ? 0x01 : 0x00), 0xF7
   };
   Serial.write(data, sizeof(data));
@@ -68,19 +61,14 @@ void sendSysex(int track, bool on) {
 void handleControlChange(byte cc, byte value) {
   if (value < 64) return;                      // act on press only, ignore release
 
-  if (cc == CC_BANK_UP) {
-    if (currentBank < MAX_BANKS - 1) currentBank++;
-    return;
+  for (int f = 0; f < NUM_FUNCTIONS; f++) {
+    int track = ccToTrack(cc, f);
+    if (track >= 0) {
+      buttonToggle[f][track] = !buttonToggle[f][track];
+      sendSysex(f, track, buttonToggle[f][track]);
+      return;
+    }
   }
-  if (cc == CC_BANK_DOWN) {
-    if (currentBank > 0) currentBank--;
-    return;
-  }
-
-  int track = ccToTrack(cc, currentBank);
-  if (track < 0) return;                       // CC belongs to the inactive bank
-  buttonToggle[currentBank][track] = !buttonToggle[currentBank][track];
-  sendSysex(track, buttonToggle[currentBank][track]);
 }
 
 void completeMessage() {
